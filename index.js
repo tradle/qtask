@@ -4,6 +4,7 @@ var levelup = require('level');
 var levelQuery = require('level-queryengine');
 var jsonQueryEngine = require('jsonquery-engine');
 var typeforce = require('typeforce');
+var extend = require('extend');
 var promisifyDB = require('./lib/promisify-level');
 var path = require('path');
 var EventEmitter = require('events').EventEmitter;
@@ -11,7 +12,7 @@ var inherits = require('util').inherits;
 var wait = require('./lib/wait');
 var pick = require('object.pick');
 var ERR_PROPS = ['message', 'arguments', 'type', 'name', 'code'];
-// var TASK_STATES = ['pending', 'running', 'success', 'fail'];
+// var TASK_STATES = ['pending', 'running', 'success', 'fail', 'struckout'];
 var STRIKES = 3;
 
 // TODO: make these an option to Queue constructor
@@ -34,6 +35,8 @@ function Queue(options) {
   this._run = options.run;
   this._throttle = options.throttle;
   this._strikes = options.strikes || STRIKES;
+  this._blockOnFail = options.blockOnFail;
+
   this._q = [];
   this._db = levelQuery(levelup(options.path, { valueEncoding: 'json' }));
   this._db.query.use(jsonQueryEngine());
@@ -145,26 +148,46 @@ Queue.prototype.delete = function(id) {
 
   if (this._deleting[id]) return this._deleting[id];
 
-  if (self._processing && self._processing.id === id) {
+  if (this.isProcessing(id)) {
     return Q.reject(new Error('Can\'t delete task while it\'s being processed'));
   }
 
   return this._deleting[id] = this._db.del(id)
     .then(function() {
-      self._q.some(function(task, idx) {
-        if (task.id === id) {
-          // let's hope Array.prototype.some doesn't use a java iterator
-          self._q.splice(idx, 1);
-          return true;
-        }
-      });
-
+      remove(self._q, id);
       self.emit('deleted', id);
     })
     .finally(function() {
       delete self._deleting[id];
+      if (self._blocked && self._blocked.id === id) delete self._blocked;
+
       self._processQueue();
     });
+}
+
+/**
+ * skip struck-out task that's blocking the queue
+ */
+Queue.prototype.skip = function(id) {
+  var self = this;
+
+  if (this.isProcessing(id)) throw new Error('Can\'t skip task while it\'s being processed');
+
+  var idx = find(this._q, id);
+  if (idx === -1) return Q.reject(new Error('task not found'));
+
+  var task = extend(true, {}, this._q[idx]); // defensive copy
+  task.status = 'skipped';
+  return this._db.put(id, task)
+    .then(function() {
+      delete self._blocked;
+      remove(self._q, id);
+      self._processQueue();
+    });
+}
+
+Queue.prototype.isProcessing = function(id) {
+  return this._processing && this._processing.id === id;
 }
 
 Queue.prototype.push = function(data) {
@@ -185,7 +208,7 @@ Queue.prototype.push = function(data) {
     })
     .then(function() {
       self._q.push(task);
-      self.emit('taskpushed', task.id);
+      self.emit('taskpushed', task);
       self._processQueue();
       return task.id;
     });
@@ -193,15 +216,28 @@ Queue.prototype.push = function(data) {
 
 Queue.prototype._processQueue = function() {
   var self = this;
-  if (this._processing || !this._q.length) return;
 
-  this._processing = this._q[0];
-  this._processOne(this._processing)
+  if (this._processing || this._blocked || !this._q.length) return;
+
+  var orig = this._q[0];
+  this._processOne(orig)
     .then(function(task) {
-      if (task.status === 'success') self._q.shift();
-      if (task.status === 'fail' && task.failCount >= self._strikes) self._q.shift();
+      if (task.status === 'success') {
+        self._q.shift();
+      }
+      else if (task.status === 'struckout') {
+        if (self._blockOnFail) {
+          self._blocked = task;
+        }
+        else {
+          self._q.shift();
+        }
+      }
 
-      self._processing = undefined;
+      if (find(self._q, task.id) !== -1) extend(true, orig, task);
+
+      // if a task failed but didn't strike out,
+      // it remains as the next task to be processed
 
       return wait(self._throttle);
     })
@@ -214,8 +250,9 @@ Queue.prototype._processQueue = function() {
 Queue.prototype._processOne = function(task) {
   var self = this;
 
+  task = this._processing = extend(true, {}, task);
   task.status = 'running';
-  this.emit('taskstart', task.id);
+  this.emit('taskstart', task);
   return this._db.put(task.id, task)
     .then(function() {
       // run
@@ -229,7 +266,7 @@ Queue.prototype._processOne = function(task) {
     .catch(function(err) {
       // on fail
       task.failCount++;
-      task.status = task.failCount >= self._strikes ? 'fail' : 'pending';
+      task.status = task.failCount >= self._strikes ? 'struckout' : 'fail';
       task.errors.push(pick(err, ERR_PROPS));
     })
     .then(function() {
@@ -237,20 +274,18 @@ Queue.prototype._processOne = function(task) {
       return self._db.put(task.id, task);
     })
     .then(function() {
-      var event = 'taskstatus:' + task.status;
-      switch (task.status) {
-      case 'success':
-        self.emit(event, task.id);
-        break;
-      case 'pending':
-      case 'fail':
-        var lastErr = task.errors[task.errors.length - 1];
-        self.emit(event, task.id, lastErr);
-        if (task.status === 'fail') self.emit('strikeout', task.id, task);
+      self._processing = undefined;
 
-        break;
+      if (task.status === 'success') {
+        self.emit('status:success', task);
       }
-
+      else {
+        var lastErr = task.errors[task.errors.length - 1];
+        self.emit('status:fail', task, lastErr);
+        if (task.status === 'struckout') {
+          self.emit('status:struckout', task);
+        }
+      }
 
       return task;
     })
@@ -259,6 +294,24 @@ Queue.prototype._processOne = function(task) {
 Queue.prototype.destroy = function() {
   this._destroyed = true;
   return Q.ninvoke(this._db, 'close');
+}
+
+function find(q, id) {
+  var idx;
+  q.some(function(task, i) {
+    if (task.id === id) {
+      // let's hope Array.prototype.some doesn't use a java iterator
+      idx = i
+      return true;
+    }
+  });
+
+  return idx;
+}
+
+function remove(q, id) {
+  var idx = find(q, id);
+  if (idx !== -1) q.splice(idx, 1);
 }
 
 module.exports = Queue;

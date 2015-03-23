@@ -5,7 +5,7 @@ var Queue = require('../');
 var wait = require('../lib/wait');
 var config = {
   throttle: 100,
-  blockOnFail: true,
+  blockOnFail: false,
   strikes: 3,
   run: postpone,
   path: './db/txrs.db'
@@ -28,9 +28,9 @@ function postpone(task) {
     .then(run.bind(null, task));
 }
 
-function succeedOn(num) {
+function succeedAfter(num) {
   var actions = [];
-  for (var i = 0; i < num - 1; i++) {
+  for (var i = 0; i < num; i++) {
     actions.push('fail');
   }
 
@@ -56,18 +56,16 @@ test('success', function(t) {
   reqs.push({
     actions: failRepeatedly(config.strikes),
     data: {
-      index: 3,
       oi: 'vey'
     }
   });
 
-  for (var i = 0; i < num - 1; i++) {
+  for (var i = 1; i < num; i++) {
     reqs.push({
       // timeout: num - i, // timeout first one the most, see if they finish in order
-      actions: succeedOn(config.strikes),
+      actions: succeedAfter(config.strikes - 1), // succeed just before striking out
       data: {
-        index: i,
-        oi: 'vey'
+        oi: 'vey' + i
       },
       public: true
     });
@@ -78,34 +76,45 @@ test('success', function(t) {
   });
 
   var finished = 0;
+  // var failed = 0;
   var started = 0;
   var pushed = 0;
 
-  q.on('taskpushed', function(id) {
-    // console.log('Pushed: ' + id);
-    t.equal(id, pushed++);
+  q.on('taskpushed', function(task) {
+    // console.log('Pushed: ' + task.id);
+    t.equal(task.id, pushed++);
   });
 
-  q.on('taskstart', function(id) {
-    // console.log('Running: ' + id);
-    t.equal(id, started);
+  q.on('taskstart', function(task) {
+    // console.log('Running: ' + task.id);
+    t.equal(task.id, started);
   });
 
-  q.on('taskstatus:fail', function(id) {
-    // console.log('Fail: ' + id);
-    t.equal(id, 0);
-    started++; // next one can start now
+  // q.on('status:fail', function(task) {
+  //   console.log('Fail: ' + task.id);
+  // });
+
+  q.on('status:struckout', function(task) {
+    // console.log('Struck out: ' + task.id);
+    t.equal(task.id, 0);
+    if (config.blockOnFail) {
+      q.skip(task.id)
+      // .then(function() {
+      //   console.log('Skipped: ' + task.id);
+      // });
+    }
+
     finish();
   });
 
-  q.on('taskstatus:success', function(id) {
-    // console.log('Success: ' + id);
-    started++; // next one can start now
-    t.equal(id, finished);
+  q.on('status:success', function(task) {
+    // console.log('Success: ' + task.id);
+    t.equal(task.id, finished);
     finish();
   });
 
   function finish() {
+    started++; // next one can start now
     if (++finished === num) {
       q.destroy().done(t.end);
     }
