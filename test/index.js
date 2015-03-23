@@ -1,11 +1,12 @@
 var Q = require('q');
 var rimraf = require('rimraf');
 var test = require('tape');
+var path = require('path');
 var Queue = require('../');
 var wait = require('../lib/wait');
 var config = {
   throttle: 100,
-  blockOnFail: false,
+  blockOnFail: true,
   strikes: 3,
   run: postpone,
   path: './db/txrs.db'
@@ -47,7 +48,7 @@ function failRepeatedly(numTimes) {
   return actions;
 }
 
-test('success', function(t) {
+test('order is preserved', function(t) {
   rimraf.sync(config.path);
   var q = new Queue(config);
   var reqs = [];
@@ -120,3 +121,7 @@ test('success', function(t) {
     }
   }
 })
+
+test('cleanup', function(t) {
+  rimraf(path.dirname(config.path), t.end);
+});
