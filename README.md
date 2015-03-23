@@ -1,9 +1,11 @@
 # Promise-based persistent task queue
 
+Work in progress
+
 ## Usage
 
 ```js
-var Queue = require('qtaskq');
+var Queue = require('qtask');
 var q = new Queue({
   throttle: 100,
   blockOnFail: true, // prevent next task from running if previous task struck out
@@ -43,7 +45,7 @@ Task succeeded
 
 Task failed
 
-### 'status:strikeout'
+### 'status:struckout'
 
 Task struck out
 
