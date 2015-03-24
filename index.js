@@ -236,7 +236,6 @@ Queue.prototype.push = function(data) {
   var task = {
     status: 'pending',
     input: data,
-    value: null, // fulfillment value
     errors: [],
     failCount: 0
   };
@@ -305,7 +304,7 @@ Queue.prototype._processOne = function(task) {
     .then(function(result) {
       // on success
       task.status = 'success';
-      task.data = result;
+      task.result = result;
     })
     .catch(function(err) {
       // on fail
