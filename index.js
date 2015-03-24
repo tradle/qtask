@@ -47,7 +47,10 @@ function Queue(options) {
   promisifyDB(this._db);
 
   this._setupCount();
-  this._load();
+  this._load()
+    .then(function() {
+      if (options.autostart) self.start();
+    });
 }
 
 inherits(Queue, EventEmitter);
@@ -101,13 +104,17 @@ Queue.prototype._load = function() {
 
   if (this.ready) return this.ready;
 
-  var failed = this._strikes === false ? this.failed() : this.failed(this._strikes);
-  var load = Q.all([
-      this.pending(),
-      failed
-    ])
-    .spread(function(pending, failed) {
-      self._q = pending.concat(failed).sort(function(a, b) {
+  var query = {
+    status: { $in: ['running', 'fail', 'pending'] }
+  }
+
+  var load = this._db.readStreamPromise(query)
+    .then(function(results) {
+      results.forEach(function(r) {
+        if (r.status === 'running') r.status = 'pending';
+      })
+
+      self._q = results.sort(function(a, b) {
         return a.id - b.id;
       })
     });
@@ -132,11 +139,9 @@ Queue.prototype.failed = function(lessThan) {
 }
 
 Queue.prototype.query = function(query) {
-  // for (var prop in query) {
-  //   if (indices.indexOf(prop) === -1) {
-  //     return Q.reject(new Error('Can only query by: ' + indices.join(', ')));
-  //   }
-  // }
+  // only return tasks
+  var orig = query || {};
+  query = { $and: [{ $not: { id: undefined } }, orig] };
 
   return this._db.readStreamPromise(query);
 }
@@ -162,9 +167,8 @@ Queue.prototype.delete = function(id) {
 
   if (this._deleting[id]) return this._deleting[id];
 
-  if (this.isProcessing(id)) {
-    return Q.reject(new Error('Can\'t delete task while it\'s being processed'));
-  }
+  var rejection = this._check('delete', id);
+  if (rejection) return rejection;
 
   return this._deleting[id] = this._db.del(id)
     .then(function() {
@@ -175,7 +179,7 @@ Queue.prototype.delete = function(id) {
       delete self._deleting[id];
       if (self._blocked && self._blocked.id === id) delete self._blocked;
 
-      self._processQueue();
+      self.start();
     });
 }
 
@@ -184,19 +188,41 @@ Queue.prototype.delete = function(id) {
  */
 Queue.prototype.skip = function(id) {
   var self = this;
-
-  if (this.isProcessing(id)) throw new Error('Can\'t skip task while it\'s being processed');
+  var rejection = this._check('skip', id);
+  if (rejection) return rejection;
 
   var idx = find(this._q, id);
-  if (idx === -1) return Q.reject(new Error('task not found'));
-
   var task = extend(true, {}, this._q[idx]); // defensive copy
   task.status = 'skipped';
   return this._db.put(id, task)
     .then(function() {
       delete self._blocked;
       remove(self._q, id);
-      self._processQueue();
+      self.start();
+    });
+}
+
+Queue.prototype._check = function(action, id) {
+  if (this.isProcessing(id)) return Q.reject(new Error('Can\'t ' + action + ' task while it\'s being processed'));
+
+  if (find(this._q, id) === -1) return Q.reject(new Error('task not found'));
+}
+
+/**
+ * @param {Number} id
+ * @param {Object} data - new input data for task with id [id]
+ */
+Queue.prototype.update = function(id, data) {
+  var self = this;
+  var rejection = this._check('update', id);
+  if (rejection) return rejection;
+
+  var idx = find(this._q, id);
+  var task = extend(true, {}, this._q[idx]); // defensive copy
+  task.input = data;
+  return this._db.put(id, task)
+    .then(function() {
+      self.start();
     });
 }
 
@@ -223,12 +249,16 @@ Queue.prototype.push = function(data) {
     .then(function() {
       self._q.push(task);
       self.emit('taskpushed', task);
-      self._processQueue();
+      self.start();
       return task.id;
     });
 }
 
-Queue.prototype._processQueue = function() {
+Queue.prototype.start = function() {
+  return this.ready.then(this._start.bind(this));
+}
+
+Queue.prototype._start = function() {
   var self = this;
 
   if (this._processing || this._blocked || !this._q.length) return;
@@ -256,7 +286,7 @@ Queue.prototype._processQueue = function() {
       return wait(self._throttle);
     })
     .then(function() {
-      self._processQueue();
+      self.start();
     })
     .done();
 }
@@ -315,7 +345,7 @@ Queue.prototype.destroy = function() {
 }
 
 function find(q, id) {
-  var idx;
+  var idx = -1;
   q.some(function(task, i) {
     if (task.id === id) {
       // let's hope Array.prototype.some doesn't use a java iterator
