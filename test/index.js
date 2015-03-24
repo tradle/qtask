@@ -8,25 +8,25 @@ var config = {
   throttle: 100,
   blockOnFail: true,
   strikes: 3,
-  run: postpone,
+  process: postpone,
   path: './db/txrs.db'
 };
 
-function run(task) {
-  switch (task.input.actions.shift()) {
+function process(data) {
+  switch (data.actions.shift()) {
     case 'success':
       break;
     case 'fail':
-      throw new Error(task.input.data);
+      throw new Error(data.data);
     // case 'pending':
     //   console.log('postponing');
     //   return postpone(task);
   }
 }
 
-function postpone(task) {
-  return wait(task.input.timeout || 0)
-    .then(run.bind(null, task));
+function postpone(data) {
+  return wait(data.timeout || 0)
+    .then(process.bind(null, data));
 }
 
 function succeedAfter(num) {

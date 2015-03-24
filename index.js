@@ -12,8 +12,8 @@ var inherits = require('util').inherits;
 var wait = require('./lib/wait');
 var pick = require('object.pick');
 var ERR_PROPS = ['message', 'arguments', 'type', 'name', 'code'];
+var indices = ['status', 'failCount'];
 // var TASK_STATES = ['pending', 'running', 'success', 'fail', 'struckout'];
-var STRIKES = 3;
 
 // TODO: make these an option to Queue constructor
 
@@ -22,26 +22,27 @@ function Queue(options) {
 
   typeforce({
     path: 'String',
-    run: 'Function',
+    process: 'Function',
     throttle: 'Number'
   }, options);
-
-  options.strikes = options.strikes || STRIKES;
 
   EventEmitter.call(this);
 
   var dir = mkdirp.sync(path.dirname(options.path));
 
-  this._run = options.run;
+  this._process = options.process;
   this._throttle = options.throttle;
-  this._strikes = options.strikes || STRIKES;
+  this._strikes = ('strikes' in options) ? options.strikes : false;
   this._blockOnFail = options.blockOnFail;
 
   this._q = [];
   this._db = levelQuery(levelup(options.path, { valueEncoding: 'json' }));
   this._db.query.use(jsonQueryEngine());
-  this._db.ensureIndex('status');
-  this._db.ensureIndex('failCount');
+
+  indices.forEach(function(i) {
+    self._db.ensureIndex(i);
+  });
+
   this._deleting = {};
   promisifyDB(this._db);
 
@@ -56,14 +57,13 @@ Queue.prototype._setupCount = function() {
 
   if ('count' in this) return;
 
-  var count = -1;
+  var count = 0;
 
   this._count = function() {
     return this._db.get('COUNT')
       .catch(function(err) {
         if (err.name === 'NotFoundError') {
-          count = 0;
-          return self._db.put('COUNT', 0);
+          return self._db.put('COUNT', count);
         }
         else throw err;
       });
@@ -101,9 +101,10 @@ Queue.prototype._load = function() {
 
   if (this.ready) return this.ready;
 
+  var failed = this._strikes === false ? this.failed() : this.failed(this._strikes);
   var load = Q.all([
       this.pending(),
-      this.failed(this._strikes)
+      failed
     ])
     .spread(function(pending, failed) {
       self._q = pending.concat(failed).sort(function(a, b) {
@@ -120,23 +121,36 @@ Queue.prototype._load = function() {
     });
 }
 
-Queue.prototype.failed = function(maxTimes) {
+/**
+ * @param {Number} [lessThan] - failed less than this many times
+ */
+Queue.prototype.failed = function(lessThan) {
   if (arguments.length === 0)
-    return this._db.readStreamPromise({ status: 'fail' });
+    return this.query({ status: 'fail' });
   else
-    return this._db.readStreamPromise({ failCount: { $lt: maxTimes } });
+    return this.query({ $and: [{ status: 'fail'}, { failCount: { $lt: lessThan } }] });
+}
+
+Queue.prototype.query = function(query) {
+  // for (var prop in query) {
+  //   if (indices.indexOf(prop) === -1) {
+  //     return Q.reject(new Error('Can only query by: ' + indices.join(', ')));
+  //   }
+  // }
+
+  return this._db.readStreamPromise(query);
 }
 
 Queue.prototype.pending = function() {
-  return this._db.readStreamPromise({ status: 'pending' });
+  return this.query({ status: 'pending' });
 }
 
 Queue.prototype.running = function() {
-  return this._db.readStreamPromise({ status: 'running' });
+  return this.query({ status: 'running' });
 }
 
 Queue.prototype.succeeded = function() {
-  return this._db.readStreamPromise({ status: 'success' });
+  return this.query({ status: 'success' });
 }
 
 Queue.prototype.getById = function(id) {
@@ -256,7 +270,7 @@ Queue.prototype._processOne = function(task) {
   return this._db.put(task.id, task)
     .then(function() {
       // run
-      return self._run(task);
+      return self._process(task.input);
     })
     .then(function(result) {
       // on success
@@ -266,7 +280,11 @@ Queue.prototype._processOne = function(task) {
     .catch(function(err) {
       // on fail
       task.failCount++;
-      task.status = task.failCount >= self._strikes ? 'struckout' : 'fail';
+      if (self._strikes !== false && task.failCount >= self._strikes)
+        task.status = 'struckout';
+      else
+        task.status = 'fail';
+
       task.errors.push(pick(err, ERR_PROPS));
     })
     .then(function() {
