@@ -30,7 +30,7 @@
   "dependencies": {
     "extend": "^2.0.0",
     "jsonquery-engine": "^1.0.2",
-    "level": "^0.18.0",
+    "level-browserify": "^0.18.1",
     "level-manifest": "^1.2.0",
     "level-queryengine": "^3.0.1",
     "mkdirp": "^0.5.0",

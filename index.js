@@ -1,6 +1,6 @@
 var Q = require('q');
 var mkdirp = require('mkdirp');
-var levelup = require('level');
+var level = require('level-browserify');
 var levelQuery = require('level-queryengine');
 var jsonQueryEngine = require('jsonquery-engine');
 var typeforce = require('typeforce');
@@ -28,15 +28,14 @@ function Queue(options) {
 
   EventEmitter.call(this);
 
-  var dir = mkdirp.sync(path.dirname(options.path));
-
+  this._options = extend(true, {}, options);
   this._process = options.process;
   this._throttle = options.throttle;
   this._strikes = ('strikes' in options) ? options.strikes : false;
   this._blockOnFail = options.blockOnFail;
 
   this._q = [];
-  this._db = levelQuery(levelup(options.path, { valueEncoding: 'json' }));
+  this._db = levelQuery(level(options.path, { valueEncoding: 'json' }));
   this._db.query.use(jsonQueryEngine());
 
   indices.forEach(function(i) {
@@ -120,6 +119,7 @@ Queue.prototype._load = function() {
     });
 
   return this.ready = Q.all([
+      Q.nfcall(mkdirp, path.dirname(this._options.path)),
       this._count(),
       load
     ])
