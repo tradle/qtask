@@ -1,6 +1,6 @@
 {
   "name": "qtask",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "persistent promise-based task queue",
   "main": "index.js",
   "directories": {
