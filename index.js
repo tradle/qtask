@@ -5,7 +5,7 @@ var levelQuery = require('level-queryengine');
 var jsonQueryEngine = require('jsonquery-engine');
 var typeforce = require('typeforce');
 var extend = require('extend');
-var promisifyDB = require('./lib/promisify-level');
+var promisifyDB = require('q-level');
 var path = require('path');
 var EventEmitter = require('events').EventEmitter;
 var inherits = require('util').inherits;
@@ -44,6 +44,7 @@ function Queue(options) {
 
   this._deleting = {};
   promisifyDB(this._db);
+  promisifyDB(this._db, 'query', { type: 'readable' })
 
   this._setupCount();
   this._load()
@@ -107,8 +108,17 @@ Queue.prototype._load = function() {
     status: { $in: ['running', 'fail', 'pending'] }
   }
 
-  var load = this._db.readStreamPromise(query)
-    .then(function(results) {
+  this._db.createReadStream()
+    .progress(function(data) {
+      debugger;
+    })
+
+  var results = [];
+  var load = this._db.query(query)
+    .progress(function(data) {
+      results.push(data);
+    })
+    .done(function() {
       results.forEach(function(r) {
         if (r.status === 'running') r.status = 'pending';
       })
@@ -340,7 +350,7 @@ Queue.prototype._processOne = function(task) {
 
 Queue.prototype.destroy = function() {
   this._destroyed = true;
-  return Q.ninvoke(this._db, 'close');
+  return this._db.close();
 }
 
 function find(q, id) {
