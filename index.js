@@ -1,11 +1,11 @@
 var Q = require('q');
 var mkdirp = require('mkdirp');
-var level = require('level-browserify');
+var levelup = require('levelup');
 var levelQuery = require('level-queryengine');
 var jsonQueryEngine = require('jsonquery-engine');
 var typeforce = require('typeforce');
 var extend = require('extend');
-var promisifyDB = require('q-level');
+var promisifyDB = require('q-level')(Q.Promise);
 var path = require('path');
 var EventEmitter = require('events').EventEmitter;
 var inherits = require('util').inherits;
@@ -23,7 +23,8 @@ function Queue(options) {
   typeforce({
     path: 'String',
     process: 'Function',
-    throttle: 'Number'
+    throttle: 'Number',
+    leveldown: 'Function'
   }, options);
 
   EventEmitter.call(this);
@@ -35,7 +36,11 @@ function Queue(options) {
   this._blockOnFail = options.blockOnFail;
 
   this._q = [];
-  this._db = levelQuery(level(options.path, { valueEncoding: 'json' }));
+  this._db = levelQuery(levelup(options.path, {
+    db: options.leveldown,
+    valueEncoding: 'json'
+  }));
+
   this._db.query.use(jsonQueryEngine());
 
   indices.forEach(function(i) {
@@ -107,11 +112,6 @@ Queue.prototype._load = function() {
   var query = {
     status: { $in: ['running', 'fail', 'pending'] }
   }
-
-  this._db.createReadStream()
-    .progress(function(data) {
-      debugger;
-    })
 
   var results = [];
   var load = this._db.query(query)
@@ -309,6 +309,7 @@ Queue.prototype._processOne = function(task) {
   return this._db.put(task.id, task)
     .then(function() {
       // run
+      task.input = normalize(task.input)
       return self._process(task.input);
     })
     .then(function(result) {
@@ -369,6 +370,24 @@ function find(q, id) {
 function remove(q, id) {
   var idx = find(q, id);
   if (idx !== -1) q.splice(idx, 1);
+}
+
+function normalize(input) {
+  for (var p in input) {
+    var val = input[p]
+    if (val) {
+      if (val.type === 'Buffer'
+        && Array.isArray(val.data)
+        && Object.keys(val).length === 2) {
+        input[p] = new Buffer(val.data)
+      }
+      else if (typeof val === 'object') {
+        normalize(val)
+      }
+    }
+  }
+
+  return input
 }
 
 module.exports = Queue;

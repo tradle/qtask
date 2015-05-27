@@ -3,13 +3,15 @@ var rimraf = require('rimraf');
 var test = require('tape');
 var path = require('path');
 var Queue = require('../');
+var leveldown = require('leveldown');
 var wait = require('../lib/wait');
 var config = {
   throttle: 100,
   blockOnFail: true,
   strikes: 3,
   process: postpone,
-  path: './db/txrs.db'
+  path: './db/txrs.db',
+  leveldown: leveldown
 };
 
 function process(data) {
