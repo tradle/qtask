@@ -118,7 +118,7 @@ Queue.prototype._load = function() {
     .progress(function(data) {
       results.push(data);
     })
-    .done(function() {
+    .then(function() {
       results.forEach(function(r) {
         if (r.status === 'running') r.status = 'pending';
       })
